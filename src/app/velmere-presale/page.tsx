@@ -14,7 +14,8 @@ import {
   useConnect,
   useSendTransaction,
   useDisconnect,
-  useSwitchChain
+  useSwitchChain,
+  useWaitForTransactionReceipt // Dodajemy useWaitForTransactionReceipt, aby poprawnie czekać na hash
 } from 'wagmi';
 import { injected } from 'wagmi/connectors';
 import { parseEther } from 'viem';
@@ -23,11 +24,14 @@ import { mainnet } from 'wagmi/chains';
 // Domyślne wartości
 const MIN_PURCHASE_USD = 10;
 const TARGET_USD = 1000000;
-const PRESALE_START_DATE = new Date('2025-06-07T00:00:00Z'); // Używam zapamiętanej daty
+const PRESALE_START_DATE = new Date('2025-06-07T00:00:00Z');
 const BASE_PRICE_USD = 0.1;
 
 // KOMPONENT LICZNIKA CZASU (BEZ NAPISU)
 const CountdownTimer = () => {
+    // WAŻNA UWAGA: Ten komponent powinien być renderowany tylko na kliencie,
+    // aby uniknąć błędów hydracji związanych z Date.now()
+    // Używamy `isClient` w komponencie nadrzędnym do warunkowego renderowania.
     const calculateTimeLeft = () => {
         const difference = +new Date("2026-01-02T00:00:00") - +new Date();
         let timeLeft = { Dni: 0, Godziny: 0, Minuty: 0, Sekundy: 0 };
@@ -69,6 +73,8 @@ const CountdownTimer = () => {
 
 // KOMPONENT ANIMACJI PIASKU
 const SandAnimation = () => {
+  // WAŻNA UWAGA: Ten komponent również powinien być renderowany tylko na kliencie,
+  // ze względu na Math.random(). Używamy `isClient` w komponencie nadrzędnym do warunkowego renderowania.
   const sandContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -139,15 +145,23 @@ export default function PresalePage() {
   const solQrCanvasRef = useRef<HTMLCanvasElement>(null);
   const suiQrCanvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Hooks
+  // Hooks Wagmi i Solana
   const { connection } = useConnection();
   const { connected: solanaConnected, publicKey: solanaPublicKey, sendTransaction: solanaSendTransaction, disconnect: solanaDisconnect, wallet } = useWallet();
   const { address: ethAddress, isConnected: isEthConnected, chain: ethChain } = useAccount();
   const { connect } = useConnect();
-  // ZMODYFIKOWANO: Użycie funkcji sendTransaction ze zwracanym obiektem
-  const { sendTransaction: wagmiSendTransaction } = useSendTransaction();
+  
+  // ZMODYFIKOWANO: Pobieramy `sendTransaction` (funkcję do wywołania) i `data` (hash transakcji po wywołaniu)
+  const { sendTransaction: wagmiSendTransaction, data: wagmiTxHashFromHook } = useSendTransaction();
   const { disconnect: ethDisconnect } = useDisconnect();
   const { switchChain } = useSwitchChain();
+
+  // ZMODYFIKOWANO: Użycie `useWaitForTransactionReceipt` do monitorowania statusu transakcji Wagmi
+  // `wagmiTxHashFromHook` jest używany jako `hash` do monitorowania.
+  const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({ 
+    hash: wagmiTxHashFromHook, 
+  });
+
 
   useEffect(() => { setIsClient(true); }, []);
 
@@ -273,7 +287,6 @@ export default function PresalePage() {
     if (selectedNetworkForPayment === "solana" && !solanaConnected) return setMessage({ type: "error", text: "Połącz portfel Solana." });
     if (selectedNetworkForPayment === 'sui') return setMessage({ type: "info", text: "Płatność w SUI nie jest jeszcze dostępna." });
 
-    let txHash: string | null = null;
     try {
       setMessage({ type: "info", text: "Otwórz portfel, aby zatwierdzić transakcję..." });
 
@@ -281,27 +294,24 @@ export default function PresalePage() {
         if (!ethAddress) throw new Error("Brak adresu ETH.");
         if (ethChain?.id !== mainnet.id) {
           await switchChain?.({ chainId: mainnet.id });
-          // WAŻNE: Po switchChain, użytkownik musi ponownie zainicjować transakcję.
-          // Zwróć uwagę, że Vercel może mieć problem z "return" po "throw" w buildzie,
-          // ale dla typowania jest to lepsze.
           return setMessage({ type: "error", text: "Proszę zmienić sieć na Ethereum Mainnet i spróbować ponownie." });
         }
         
-        // POPRAWKA TYPOWANIA: Jawne rzutowanie typu dla wagmiSendTransaction
-        // Używamy wagmiSendTransaction, aby uniknąć kolizji nazw, jeśli istnieje inna funkcja sendTransaction
-        // Typ `Hash` z viem to `0x${string}`
-        const txResult: { hash: `0x${string}` } | undefined = await wagmiSendTransaction({ 
+        // ZMODYFIKOWANO LOGIKĘ WAGMI:
+        // Wywołujemy `wagmiSendTransaction`. Hash transakcji (`wagmiTxHashFromHook`)
+        // będzie dostępny ASYNCHRONICZNIE PO tym, jak użytkownik zaakceptuje transakcję w swoim portfelu.
+        wagmiSendTransaction({ 
             to: ethReceiveAddress, 
             value: parseEther(purchaseCurrencyAmount.toFixed(18)) 
         });
-        
-        // KONTROLA: Sprawdzenie, czy txResult i txResult.hash istnieją
-        if (txResult && txResult.hash) {
-            txHash = txResult.hash;
-        } else {
-            // Dodatkowa obsługa przypadku, gdy użytkownik odrzuci transakcję, a txResult jest undefined
-            throw new Error("Transakcja Ethereum nie zwróciła hash'a lub została odrzucona/anulowana.");
-        }
+
+        // POLECENIE:
+        // Po wywołaniu wagmiSendTransaction, funkcja handleBuy NIE MOŻE natychmiastowo zakładać,
+        // że hash jest dostępny. Dalsza logika dla transakcji Ethereum (aktualizacja UI, wysyłka do API)
+        // MUSI być obsługiwana przez useEffect, który monitoruje `wagmiTxHashFromHook`
+        // i `isConfirmed` (z useWaitForTransactionReceipt).
+        // Zatem, dla Ethereum, ta funkcja handleBuy tutaj się kończy, po zainicjowaniu transakcji.
+        return; // Zakończ funkcję, aby nie kontynuować synchronizacyjnie z hashem, który jeszcze nie nadszedł.
 
       } else if (selectedNetworkForPayment === "solana") {
         if (!solanaPublicKey || !solanaSendTransaction) throw new Error("Portfel Solana nie jest gotowy.");
@@ -322,45 +332,73 @@ export default function PresalePage() {
 
         const signature = await solanaSendTransaction(transaction, connection);
         await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
-        txHash = signature;
+        
+        // OBSŁUGA SOLANA: Hash jest dostępny synchronicznie po potwierdzeniu.
+        const txHash = signature; 
+        
+        // ZMODYFIKOWANO: Przeniesiono wspólną logikę do funkcji pomocniczej
+        // dla czystości kodu i uniknięcia duplikacji.
+        await processTransactionAfterHash(txHash, selectedNetworkForPayment, ethAddress || solanaPublicKey.toBase58(), amountToBuy, vlmAmount, purchaseCurrencyAmount);
       }
     } catch (e: any) {
-      // Bardziej precyzyjna obsługa błędu odrzucenia transakcji
       return setMessage({ type: "error", text: e.message.includes("User rejected") || e.name === "TransactionExecutionError" ? "Transakcja odrzucona przez użytkownika." : `Błąd: ${e.message}` });
     }
+  };
 
-    if (txHash) {
+  // ZMODYFIKOWANO: Funkcja pomocnicza do przetwarzania transakcji po uzyskaniu hasha.
+  // Dzięki temu kod jest bardziej modułowy i łatwiejszy do zarządzania.
+  const processTransactionAfterHash = async (txHash: string, network: "ethereum" | "solana" | "sui", walletAddress: string, usdAmount: number, tokenAmount: number, currencyAmount: number) => {
       setMessage({ type: "success", text: `Transakcja wysłana! Hash: ${txHash.substring(0, 10)}...` });
-      setTotalRaisedUSD(prev => prev + amountToBuy);
+      setTotalRaisedUSD(prev => prev + usdAmount);
 
       try {
-        const walletAddress = selectedNetworkForPayment === 'ethereum' ? ethAddress : solanaPublicKey?.toBase58();
-
         const response = await fetch('/api/process-transaction', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             walletAddress: walletAddress,
             txHash: txHash,
-            network: selectedNetworkForPayment.toUpperCase(),
-            amount: purchaseCurrencyAmount,
-            tokenAmount: vlmAmount,
-            usdAmount: amountToBuy,
+            network: network.toUpperCase(),
+            amount: currencyAmount,
+            tokenAmount: tokenAmount,
+            usdAmount: usdAmount,
           }),
         });
 
         const data = await response.json();
         if (response.ok) {
           console.log("Serwer pomyślnie zarejestrował transakcję:", data.message);
-          setUserTokenBalance(prev => (prev || 0) + vlmAmount);
+          setUserTokenBalance(prev => (prev || 0) + tokenAmount);
         } else {
           console.error("Błąd podczas wysyłania danych do serwera:", data.error);
         }
       } catch (error) {
         console.error("Nie udało się połączyć z API serwera:", error);
       }
-    }
   };
+
+  // ZMODYFIKOWANO: useEffect do monitorowania statusu transakcji Wagmi
+  // Ta logika będzie wykonywana PO tym, jak użytkownik zaakceptuje transakcję w portfelu
+  // i Wagmi zwróci hash, a następnie po potwierdzeniu transakcji w sieci.
+  useEffect(() => {
+    if (wagmiTxHashFromHook && isConfirmed) {
+        setMessage({ type: "success", text: `Transakcja Ethereum potwierdzona! Hash: ${wagmiTxHashFromHook.substring(0, 10)}...` });
+        
+        // Wywołujemy wspólną funkcję do przetwarzania transakcji
+        processTransactionAfterHash(
+            wagmiTxHashFromHook, 
+            "ethereum", 
+            ethAddress || '', // ethAddress powinien być dostępny, ale dla pewności pusty string
+            amountToBuy, 
+            vlmAmount, 
+            purchaseCurrencyAmount
+        );
+
+    } else if (wagmiTxHashFromHook && isConfirming) {
+        setMessage({ type: "info", text: `Transakcja Ethereum w trakcie potwierdzania... Hash: ${wagmiTxHashFromHook.substring(0, 10)}...` });
+    }
+  }, [wagmiTxHashFromHook, isConfirmed, isConfirming, ethAddress, amountToBuy, vlmAmount, purchaseCurrencyAmount]);
+
 
   const isAnyWalletConnected = isEthConnected || solanaConnected;
 
@@ -527,8 +565,9 @@ export default function PresalePage() {
         <div className="hidden lg:flex flex-1 relative">
             <div className="absolute top-1/2 -translate-y-1/2" style={{ left: '40%' }}>
                 <div className="flex flex-col items-center gap-8">
-                    <CountdownTimer />
-                    <SandAnimation />
+                    {/* Renderujemy komponenty dynamicznie tylko na kliencie, aby uniknąć błędów hydracji */}
+                    {isClient && <CountdownTimer />}
+                    {isClient && <SandAnimation />}
                 </div>
             </div>
         </div>
