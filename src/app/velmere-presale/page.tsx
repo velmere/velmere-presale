@@ -23,7 +23,7 @@ import { mainnet } from 'wagmi/chains';
 // Domyślne wartości
 const MIN_PURCHASE_USD = 10;
 const TARGET_USD = 1000000;
-const PRESALE_START_DATE = new Date('2025-06-07T00:00:00Z');
+const PRESALE_START_DATE = new Date('2025-06-07T00:00:00Z'); // Używam zapamiętanej daty
 const BASE_PRICE_USD = 0.1;
 
 // KOMPONENT LICZNIKA CZASU (BEZ NAPISU)
@@ -144,7 +144,8 @@ export default function PresalePage() {
   const { connected: solanaConnected, publicKey: solanaPublicKey, sendTransaction: solanaSendTransaction, disconnect: solanaDisconnect, wallet } = useWallet();
   const { address: ethAddress, isConnected: isEthConnected, chain: ethChain } = useAccount();
   const { connect } = useConnect();
-  const { sendTransaction } = useSendTransaction();
+  // ZMODYFIKOWANO: Użycie funkcji sendTransaction ze zwracanym obiektem
+  const { sendTransaction: wagmiSendTransaction } = useSendTransaction();
   const { disconnect: ethDisconnect } = useDisconnect();
   const { switchChain } = useSwitchChain();
 
@@ -280,18 +281,25 @@ export default function PresalePage() {
         if (!ethAddress) throw new Error("Brak adresu ETH.");
         if (ethChain?.id !== mainnet.id) {
           await switchChain?.({ chainId: mainnet.id });
-          // Proszę ponownie zatwierdzić transakcję po zmianie sieci.
-          // Możesz dodać tutaj return, aby nie kontynuować, jeśli użytkownik nie zmienił sieci lub odrzucił
+          // WAŻNE: Po switchChain, użytkownik musi ponownie zainicjować transakcję.
+          // Zwróć uwagę, że Vercel może mieć problem z "return" po "throw" w buildzie,
+          // ale dla typowania jest to lepsze.
           return setMessage({ type: "error", text: "Proszę zmienić sieć na Ethereum Mainnet i spróbować ponownie." });
         }
         
-        // ZMODYFIKOWANA LINIA: Upewnienie się, że txResult ma 'hash'
-        const txResult = await sendTransaction({ to: ethReceiveAddress, value: parseEther(purchaseCurrencyAmount.toFixed(18)) });
+        // POPRAWKA TYPOWANIA: Jawne rzutowanie typu dla wagmiSendTransaction
+        // Używamy wagmiSendTransaction, aby uniknąć kolizji nazw, jeśli istnieje inna funkcja sendTransaction
+        // Typ `Hash` z viem to `0x${string}`
+        const txResult: { hash: `0x${string}` } | undefined = await wagmiSendTransaction({ 
+            to: ethReceiveAddress, 
+            value: parseEther(purchaseCurrencyAmount.toFixed(18)) 
+        });
         
-        // DODANO KONTROLĘ: Sprawdzenie, czy txResult i txResult.hash istnieją
+        // KONTROLA: Sprawdzenie, czy txResult i txResult.hash istnieją
         if (txResult && txResult.hash) {
             txHash = txResult.hash;
         } else {
+            // Dodatkowa obsługa przypadku, gdy użytkownik odrzuci transakcję, a txResult jest undefined
             throw new Error("Transakcja Ethereum nie zwróciła hash'a lub została odrzucona/anulowana.");
         }
 
@@ -317,7 +325,8 @@ export default function PresalePage() {
         txHash = signature;
       }
     } catch (e: any) {
-      return setMessage({ type: "error", text: e.message.includes("User rejected") ? "Transakcja odrzucona." : `Błąd: ${e.message}` });
+      // Bardziej precyzyjna obsługa błędu odrzucenia transakcji
+      return setMessage({ type: "error", text: e.message.includes("User rejected") || e.name === "TransactionExecutionError" ? "Transakcja odrzucona przez użytkownika." : `Błąd: ${e.message}` });
     }
 
     if (txHash) {
@@ -561,7 +570,7 @@ export default function PresalePage() {
             </div>
           </div>
         </section>
-        
+
         <section className="w-full grid grid-cols-1 md:grid-cols-3 gap-8 mb-16">
           <div className="bg-gray-900 bg-opacity-70 backdrop-blur-sm p-6 rounded-2xl shadow-lg text-center flex flex-col items-center border border-gray-800 transition-all duration-300 hover:border-purple-500 hover:shadow-purple-500/20 hover:scale-105">
             <h3 className="text-2xl font-bold mb-4 text-purple-400">Ethereum (ETH)</h3>
