@@ -280,10 +280,20 @@ export default function PresalePage() {
         if (!ethAddress) throw new Error("Brak adresu ETH.");
         if (ethChain?.id !== mainnet.id) {
           await switchChain?.({ chainId: mainnet.id });
-          throw new Error("Proszę ponownie zatwierdzić transakcję po zmianie sieci.");
+          // Proszę ponownie zatwierdzić transakcję po zmianie sieci.
+          // Możesz dodać tutaj return, aby nie kontynuować, jeśli użytkownik nie zmienił sieci lub odrzucił
+          return setMessage({ type: "error", text: "Proszę zmienić sieć na Ethereum Mainnet i spróbować ponownie." });
         }
+        
+        // ZMODYFIKOWANA LINIA: Upewnienie się, że txResult ma 'hash'
         const txResult = await sendTransaction({ to: ethReceiveAddress, value: parseEther(purchaseCurrencyAmount.toFixed(18)) });
-        txHash = txResult.hash;
+        
+        // DODANO KONTROLĘ: Sprawdzenie, czy txResult i txResult.hash istnieją
+        if (txResult && txResult.hash) {
+            txHash = txResult.hash;
+        } else {
+            throw new Error("Transakcja Ethereum nie zwróciła hash'a lub została odrzucona/anulowana.");
+        }
 
       } else if (selectedNetworkForPayment === "solana") {
         if (!solanaPublicKey || !solanaSendTransaction) throw new Error("Portfel Solana nie jest gotowy.");
