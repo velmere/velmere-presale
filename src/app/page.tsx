@@ -281,7 +281,7 @@ export default function PresalePage() {
 
     const handleConnectMetamask = () => {
         const injectedConnector = injected();
-        if (injectedConnector.id) {
+        if (injectedConnector) {
             wagmiConnect({ connector: injectedConnector });
         } else {
             setMessage({ type: "error", text: "MetaMask nie jest dostępny. Upewnij się, że masz go zainstalowanego." });
