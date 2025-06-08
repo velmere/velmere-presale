@@ -19,11 +19,12 @@ import {
     useWaitForTransactionReceipt
 } from 'wagmi';
 import { injected } from 'wagmi/connectors';
-import { parseEther } from 'viem';
 import { mainnet } from 'wagmi/chains';
+import { parseEther } from 'viem';
+
 
 // Domyślne wartości
-const MIN_PURCHASE_USD = 10;
+const MIN_PURCHASE_USD = 0.1;
 const TARGET_USD = 1000000;
 const PRESALE_START_DATE = new Date('2025-06-07T00:00:00Z');
 const BASE_PRICE_USD = 0.1;
@@ -132,16 +133,17 @@ export default function PresalePage() {
     const [liveExchangeRates, setLiveExchangeRates] = useState({ ETH_USD: 3500, SOL_USD: 150, SUI_USD: 1.2 });
     const [pricesError, setPricesError] = useState<string | null>(null);
     const [isClient, setIsClient] = useState(false);
+    const [isPaymentInfoOpen, setIsPaymentInfoOpen] = useState(false); // NOWY STAN
 
     const ethQrCanvasRef = useRef<HTMLCanvasElement>(null);
     const solQrCanvasRef = useRef<HTMLCanvasElement>(null);
     const suiQrCanvasRef = useRef<HTMLCanvasElement>(null);
 
+    // Hooks Wagmi i Solana
     const { connection } = useConnection();
     const { connected: solanaConnected, publicKey: solanaPublicKey, sendTransaction: solanaSendTransaction, disconnect: solanaDisconnect, wallet } = useWallet();
     const { address: ethAddress, isConnected: isEthConnected, chain: ethChain } = useAccount();
-    const { connect } = useConnect();
-
+    const { connect: wagmiConnect } = useConnect();
     const { sendTransaction: wagmiSendTransaction, data: wagmiTxHashFromHook } = useSendTransaction();
     const { disconnect: ethDisconnect } = useDisconnect();
     const { switchChain } = useSwitchChain();
@@ -149,6 +151,8 @@ export default function PresalePage() {
     const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({
         hash: wagmiTxHashFromHook,
     });
+
+    const [showEthNetworkInfo, setShowEthNetworkInfo] = useState(false);
 
 
     useEffect(() => { setIsClient(true); }, []);
@@ -185,8 +189,15 @@ export default function PresalePage() {
             try {
                 const response = await fetch('/api/prices');
                 const data = await response.json();
-                if (response.ok) setLiveExchangeRates(data); else setPricesError('Nie udało się pobrać cen.');
-            } catch (error) { setPricesError('Błąd połączenia z serwerem cen.'); }
+                if (response.ok) {
+                    setLiveExchangeRates(data);
+                    setPricesError(null);
+                } else {
+                    setPricesError('Nie udało się pobrać cen. Użyto wartości domyślnych.');
+                }
+            } catch (error) {
+                setPricesError('Błąd połączenia z serwerem cen. Użyto wartości domyślnych.');
+            }
         };
         fetchPrices();
         const interval = setInterval(fetchPrices, 60000);
@@ -236,25 +247,26 @@ export default function PresalePage() {
 
         setUserTokenBalance(null);
 
-        if (solanaConnected && wallet && solanaPublicKey) {
-            const walletName = wallet.adapter.name;
-            if (walletName.toLowerCase().includes('metamask') || walletName.toLowerCase().includes('injected')) {
-                if (!isEthConnected) {
-                    connect({ connector: injected() });
-                }
-                setSelectedNetworkForPayment("ethereum");
-                if (ethAddress) checkUserBalance(ethAddress);
-            } else {
-                setSelectedNetworkForPayment("solana");
-                checkUserBalance(solanaPublicKey.toBase58());
-            }
-        } else if (isEthConnected && !solanaConnected && ethAddress) {
+        if (isEthConnected && ethAddress) {
             setSelectedNetworkForPayment("ethereum");
             checkUserBalance(ethAddress);
+        } else if (solanaConnected && solanaPublicKey) {
+            setSelectedNetworkForPayment("solana");
+            checkUserBalance(solanaPublicKey.toBase58());
         } else {
             setSelectedNetworkForPayment(null);
         }
-    }, [solanaConnected, isEthConnected, ethAddress, solanaPublicKey, wallet, connect]);
+    }, [solanaConnected, isEthConnected, ethAddress, solanaPublicKey, wallet]);
+
+
+    useEffect(() => {
+        if (selectedNetworkForPayment === "ethereum" && isEthConnected && ethChain?.id !== mainnet.id) {
+            setShowEthNetworkInfo(true);
+        } else {
+            setShowEthNetworkInfo(false);
+        }
+    }, [selectedNetworkForPayment, isEthConnected, ethChain]);
+
 
     const copyToClipboard = async (text: string, type: string) => {
         await navigator.clipboard.writeText(text);
@@ -262,9 +274,24 @@ export default function PresalePage() {
         setTimeout(() => setCopiedAddress(null), 2000);
     };
 
+    const handleAmountToBuyChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const value = parseFloat(e.target.value);
+        setAmountToBuy(Math.max(MIN_PURCHASE_USD, value || 0));
+    };
+
+    const handleConnectMetamask = () => {
+        const injectedConnector = injected();
+        if (injectedConnector.id) {
+            wagmiConnect({ connector: injectedConnector });
+        } else {
+            setMessage({ type: "error", text: "MetaMask nie jest dostępny. Upewnij się, że masz go zainstalowanego." });
+        }
+    };
+
+
     const handleBuy = async () => {
         setMessage(null);
-        if (amountToBuy < MIN_PURCHASE_USD) return setMessage({ type: "error", text: `Minimalna kwota to ${MIN_PURCHASE_USD} USD.` });
+        if (amountToBuy < MIN_PURCHASE_USD) return setMessage({ type: "error", text: `Minimalna kwota to ${MIN_PURCHASE_USD.toFixed(2)} USD.` });
         if (!selectedNetworkForPayment) return setMessage({ type: "error", text: "Wybierz sieć płatności." });
 
         if (selectedNetworkForPayment === "ethereum" && !isEthConnected) return setMessage({ type: "error", text: "Połącz portfel Ethereum." });
@@ -277,19 +304,22 @@ export default function PresalePage() {
             if (selectedNetworkForPayment === "ethereum") {
                 if (!ethAddress) throw new Error("Brak adresu ETH.");
                 if (ethChain?.id !== mainnet.id) {
-                    await switchChain?.({ chainId: mainnet.id });
-                    return setMessage({ type: "error", text: "Proszę zmienić sieć na Ethereum Mainnet i spróbować ponownie." });
+                    setMessage({ type: "error", text: "Proszę zmienić sieć na Ethereum Mainnet w portfelu i spróbować ponownie." });
+                    return;
                 }
 
                 wagmiSendTransaction({
                     to: ethReceiveAddress,
                     value: parseEther(purchaseCurrencyAmount.toFixed(18))
                 });
-
                 return;
 
             } else if (selectedNetworkForPayment === "solana") {
                 if (!solanaPublicKey || !solanaSendTransaction) throw new Error("Portfel Solana nie jest gotowy.");
+
+                if (purchaseCurrencyAmount * LAMPORTS_PER_SOL < 1) {
+                    return setMessage({ type: "error", text: "Obliczona kwota SOL jest zbyt mała. Zwiększ kwotę zakupu USD." });
+                }
 
                 const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10000 });
                 const transaction = new Transaction().add(addPriorityFee).add(
@@ -300,43 +330,75 @@ export default function PresalePage() {
                     })
                 );
 
+                let blockhashInfo;
+                try {
+                    blockhashInfo = await connection.getLatestBlockhash('finalized');
+                } catch (error) {
+                    console.error("Błąd podczas pobierania blockhash:", error);
+                    setMessage({ type: "error", text: "Nie udało się pobrać aktualnych informacji o sieci. Spróbuj ponownie." });
+                    return;
+                }
+
+                transaction.recentBlockhash = blockhashInfo.blockhash;
+                transaction.lastValidBlockHeight = blockhashInfo.lastValidBlockHeight;
+                transaction.feePayer = solanaPublicKey;
+
                 console.log("Przygotowanie transakcji Solana...");
                 console.log("Od: ", solanaPublicKey.toBase58());
                 console.log("Do: ", solReceiveAddress);
                 console.log("Kwota (Lamports): ", Math.floor(purchaseCurrencyAmount * LAMPORTS_PER_SOL));
-
-
-                const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
-                transaction.recentBlockhash = blockhash;
-                transaction.lastValidBlockHeight = lastValidBlockHeight;
-                transaction.feePayer = solanaPublicKey;
-
-                console.log("Pobrany blockhash: ", blockhash);
+                console.log("Pobrany blockhash: ", blockhashInfo.blockhash);
                 console.log("Transakcja przed wysłaniem do portfela: ", transaction);
 
-                // TUTAJ NAJPRAWDOPODOBNIEJ WYSTĘPUJE BŁĄD PODPISU NA TELEFONIE
                 const signature = await solanaSendTransaction(transaction, connection);
-                console.log("Transakcja wysłana, oczekiwanie na potwierdzenie...");
-                await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
-                console.log("Transakcja Solana potwierdzona:", signature);
+                setMessage({ type: "info", text: `Transakcja wysłana! Hash: ${signature.substring(0, 10)}... Oczekiwanie na potwierdzenie...` });
 
+                const confirmation = await connection.confirmTransaction(
+                    { signature, blockhash: blockhashInfo.blockhash, lastValidBlockHeight: blockhashInfo.lastValidBlockHeight },
+                    'confirmed'
+                );
+
+                if (confirmation.value.err) {
+                    console.error("Transakcja Solana nie powiodła się po potwierdzeniu:", confirmation.value.err);
+                    let specificError = "Nieznany błąd wykonania transakcji.";
+                    if (typeof confirmation.value.err === 'string') {
+                        specificError = confirmation.value.err;
+                    } else if (confirmation.value.err && 'InstructionError' in confirmation.value.err) {
+                        specificError = `InstructionError: ${JSON.stringify(confirmation.value.err.InstructionError)}`;
+                    }
+
+                    if (specificError.includes("InstructionError") && specificError.includes("Custom\":1")) {
+                        setMessage({ type: "error", text: `Transakcja nieudana: Brak wystarczających środków na koncie SOL do pokrycia kwoty transferu i opłat transakcyjnych.` });
+                    } else {
+                        setMessage({ type: "error", text: `Transakcja nieudana: ${specificError}. Sprawdź, czy masz wystarczająco środków lub spróbuj ponownie.` });
+                    }
+                    return;
+                }
+
+                console.log("Transakcja Solana potwierdzona i zakończona sukcesem:", signature);
                 const txHash = signature;
 
                 await processTransactionAfterHash(txHash, selectedNetworkForPayment, ethAddress || solanaPublicKey.toBase58(), amountToBuy, vlmAmount, purchaseCurrencyAmount);
             }
         } catch (e: any) {
-            console.error("Błąd podczas transakcji:", e); // Ulepszone logowanie błędu
-            // Dodaj bardziej szczegółową analizę dla błędów Solana
+            console.error("Błąd podczas transakcji (catch):", e);
             let errorMessage = "Wystąpił nieznany błąd podczas transakcji.";
-            if (e.message.includes("User rejected") || e.name === "WalletAdapterError" && e.message.includes("User rejected the request")) {
-                errorMessage = "Transakcja odrzucona przez użytkownika.";
-            } else if (e.name === "WalletAdapterNetworkError" || e.message.includes("failed to get recent blockhash") || e.message.includes("signature verification failed")) {
-                errorMessage = "Błąd sieci lub portfela. Spróbuj ponownie lub odśwież stronę.";
-                // Możesz dodać instrukcję dla użytkownika, aby zaktualizował portfel lub sprawdził połączenie.
+
+            if (e.message?.includes("User rejected") || (e.name === "WalletAdapterError" && e.message?.includes("User rejected the request"))) {
+                errorMessage = "Transakcja odrzucona przez użytkownika w portfelu.";
+            } else if (e.message?.includes("failed to get recent blockhash") || e.message?.includes("Signature verification failed")) {
+                errorMessage = "Błąd transakcji: Proszę spróbować ponownie. Czasami transakcja wygasa, jeśli zbyt długo czekasz na podpisanie w portfelu, lub brakuje środków na opłaty.";
+            } else if (e.message?.includes("insufficient funds") || (e.logs && e.logs.some((log: string) => log.includes("insufficient funds")))) {
+                 errorMessage = "Brak wystarczających środków na koncie do pokrycia transakcji i opłat.";
             } else if (e.name === "TransactionExecutionError") {
-                 errorMessage = "Błąd wykonania transakcji w sieci.";
+                 errorMessage = "Błąd wykonania transakcji w sieci. Sprawdź, czy masz wystarczająco środków.";
+            } else if (e.message?.includes("Timeout")) {
+                errorMessage = "Przekroczono czas oczekiwania na transakcję. Proszę spróbować ponownie.";
+            } else if (e.message?.includes("could not be confirmed")) {
+                errorMessage = "Transakcja została wysłana, ale nie mogła zostać potwierdzona. Sprawdź historię portfela.";
             }
-            return setMessage({ type: "error", text: errorMessage });
+
+            setMessage({ type: "error", text: errorMessage });
         }
     };
 
@@ -364,16 +426,17 @@ export default function PresalePage() {
                 setUserTokenBalance(prev => (prev || 0) + tokenAmount);
             } else {
                 console.error("Błąd podczas wysyłania danych do serwera:", data.error);
+                setMessage({ type: "error", text: `Transakcja udana w sieci, ale błąd rejestracji na serwerze: ${data.error}` });
             }
         } catch (error) {
             console.error("Nie udało się połączyć z API serwera:", error);
+            setMessage({ type: "error", text: "Transakcja udana w sieci, ale błąd komunikacji z serwerem rejestracji. Skontaktuj się z obsługą." });
         }
     };
 
     useEffect(() => {
         if (wagmiTxHashFromHook && isConfirmed) {
             setMessage({ type: "success", text: `Transakcja Ethereum potwierdzona! Hash: ${wagmiTxHashFromHook.substring(0, 10)}...` });
-
             processTransactionAfterHash(
                 wagmiTxHashFromHook,
                 "ethereum",
@@ -460,6 +523,16 @@ export default function PresalePage() {
                         background-clip: text;
                         -webkit-background-clip: text;
                         animation: price-shimmer 4s linear infinite;
+                }
+                .payment-info-content {
+                    max-height: 0;
+                    overflow: hidden;
+                    transition: max-height 0.5s ease-in-out, opacity 0.5s ease-in-out;
+                    opacity: 0;
+                }
+                .payment-info-content.open {
+                    max-height: 500px; /* Ustaw wystarczająco dużą wartość */
+                    opacity: 1;
                 }
             `}</style>
 
@@ -554,6 +627,7 @@ export default function PresalePage() {
                 <div className="hidden lg:flex flex-1 relative">
                     <div className="absolute top-1/2 -translate-y-1/2" style={{ left: '40%' }}>
                         <div className="flex flex-col items-center gap-8">
+                            {/* Renderujemy komponenty dynamicznie tylko na kliencie, aby uniknąć błędów hydracji */}
                             {isClient && <CountdownTimer />}
                             {isClient && <SandAnimation />}
                         </div>
@@ -593,6 +667,32 @@ export default function PresalePage() {
                             <div>
                                 <h3 className="text-lg font-bold text-white">3. Odbierz Tokeny</h3>
                                 <p className="text-gray-400 text-sm">Tokeny VLM zostaną automatycznie wysłane na Twój adres po zakończeniu przedsprzedaży.</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* NOWA SEKCJA INFORMACYJNA */}
+                    <div className="mt-8 border-t border-gray-700 pt-6">
+                        <button
+                            onClick={() => setIsPaymentInfoOpen(!isPaymentInfoOpen)}
+                            className="w-full flex justify-between items-center text-left text-lg font-semibold text-purple-300 hover:text-purple-200 transition-colors"
+                        >
+                            <span>Ważne informacje o płatnościach</span>
+                            <svg
+                                className={`w-6 h-6 transform transition-transform duration-300 ${isPaymentInfoOpen ? 'rotate-180' : 'rotate-0'}`}
+                                fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"
+                            >
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                            </svg>
+                        </button>
+                        <div className={`payment-info-content ${isPaymentInfoOpen ? 'open' : ''}`}>
+                            <div className="mt-4 text-left text-sm text-gray-400 space-y-3">
+                                <p>
+                                    Po połączeniu portfela MetaMask, domyślnie może on operować na sieci Solana. Aby dokonać płatności w ETH, konieczna jest zmiana sieci na <strong>Ethereum Mainnet</strong>.
+                                </p>
+                                <p>
+                                    Możesz to zrobić bezpośrednio w aplikacji MetaMask, zazwyczaj w lewym górnym rogu interfejsu. Po zmianie sieci, upewnij się, że portfel jest wciąż połączony z naszą stroną, a następnie ponów próbę płatności.
+                                </p>
                             </div>
                         </div>
                     </div>
